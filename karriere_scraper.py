@@ -69,14 +69,19 @@ def _search_url(field: str, region: str, page: int = 1) -> str:
     return url
 
 def _collect_job_links_on_page(driver) -> List[str]:
+    import re
     anchors = driver.find_elements(By.CSS_SELECTOR, 'a[href*="/jobs/"]')
     links, seen = [], set()
     for a in anchors:
         href = a.get_attribute("href")
-        if href and "/jobs/" in href and href not in seen:
+        if not href:
+            continue
+        # keep only canonical detail pages like .../jobs/7605540
+        if re.search(r"/jobs/\d+(?:[/?#].*)?$", href) and href not in seen:
             seen.add(href)
             links.append(href)
     return links
+
 
 def _extract_job(driver, url: str) -> Optional[Dict]:
     try:
