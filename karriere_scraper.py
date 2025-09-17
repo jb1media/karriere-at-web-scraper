@@ -84,34 +84,84 @@ def _collect_job_links_on_page(driver) -> List[str]:
 
 
 def _extract_job(driver, url: str) -> Optional[Dict]:
+    import json, re
+    from html import unescape
     try:
         driver.get(url)
         _wait_css(driver, "body")
-        title = None
-        company = None
-        location = None
-        description = None
-        posted_at = None
 
-        els = driver.find_elements(By.CSS_SELECTOR, 'h1,[data-qa="job-title"]')
-        if els: title = _visible_text(els[0].text)
+        # --- Prefer JSON-LD (JobPosting) ---
+        org = title = location = description = posted_at = None
 
-        els = driver.find_elements(By.CSS_SELECTOR, '[data-qa="company-name"], a[href*="/firmen/"], .job-company')
-        if els: company = _visible_text(els[0].text)
+        scripts = driver.find_elements(By.CSS_SELECTOR, 'script[type="application/ld+json"]')
+        for s in scripts:
+            try:
+                raw = s.get_attribute("textContent") or s.get_attribute("innerHTML") or ""
+                raw = raw.strip()
+                if not raw:
+                    continue
+                data = json.loads(raw)
+                # JSON-LD can be dict or list; normalize to list
+                candidates = data if isinstance(data, list) else [data]
+                for item in candidates:
+                    if not isinstance(item, dict):
+                        continue
+                    # Some pages wrap JobPosting in @graph
+                    graph = item.get("@graph") if "@graph" in item else None
+                    if isinstance(graph, list):
+                        for g in graph:
+                            if isinstance(g, dict) and g.get("@type") == "JobPosting":
+                                item = g
+                                break
+                    if item.get("@type") == "JobPosting":
+                        title = item.get("title") or title
+                        posted_at = item.get("datePosted") or posted_at
+                        # Company
+                        org_obj = item.get("hiringOrganization") or {}
+                        if isinstance(org_obj, dict):
+                            org = org_obj.get("name") or org
+                        # Location
+                        loc_obj = item.get("jobLocation") or {}
+                        # jobLocation can be list or dict
+                        if isinstance(loc_obj, list) and loc_obj:
+                            loc_obj = loc_obj[0]
+                        if isinstance(loc_obj, dict):
+                            addr = loc_obj.get("address") or {}
+                            if isinstance(addr, dict):
+                                location = addr.get("addressLocality") or addr.get("addressRegion") or location
+                        # Description (strip HTML tags crudely)
+                        desc_html = item.get("description") or ""
+                        if desc_html:
+                            description = _visible_text(re.sub(r"<[^>]+>", " ", unescape(desc_html)))
+                        break
+            except Exception:
+                continue
 
-        els = driver.find_elements(By.CSS_SELECTOR, '[data-qa="job-location"], .job-location, [itemprop="addressLocality"]')
-        if els: location = _visible_text(els[0].text)
+        # --- Fallbacks via CSS if JSON-LD missing/partial ---
+        if not title:
+            els = driver.find_elements(By.CSS_SELECTOR, 'h1,[data-qa="job-title"], h1[class*="title"]')
+            if els: title = _visible_text(els[0].text)
 
-        els = driver.find_elements(By.CSS_SELECTOR, '[data-qa="job-description"], article, .job-description')
-        if els: description = _visible_text(els[0].text)
+        if not org:
+            els = driver.find_elements(By.CSS_SELECTOR, '[data-qa="company-name"], a[href*="/firmen/"], .job-company, [itemprop="hiringOrganization"]')
+            if els: org = _visible_text(els[0].text)
 
-        els = driver.find_elements(By.CSS_SELECTOR, 'time[datetime], [data-qa="job-posted"], .posted-date')
-        if els:
-            posted_at = (els[0].get_attribute("datetime") or els[0].text or "").strip()
+        if not location:
+            els = driver.find_elements(By.CSS_SELECTOR, '[data-qa="job-location"], .job-location, [itemprop="addressLocality"], [data-qa="locations"]')
+            if els: location = _visible_text(els[0].text)
+
+        if not description:
+            els = driver.find_elements(By.CSS_SELECTOR, '[data-qa="job-description"], article, .job-description, [itemprop="description"]')
+            if els: description = _visible_text(els[0].text)
+
+        if not posted_at:
+            els = driver.find_elements(By.CSS_SELECTOR, 'time[datetime], [data-qa="job-posted"], .posted-date')
+            if els:
+                posted_at = (els[0].get_attribute("datetime") or els[0].text or "").strip()
 
         return {
             "title": title,
-            "company": company,
+            "company": org,
             "location": location,
             "posted_at": posted_at,
             "link": url,
@@ -119,6 +169,7 @@ def _extract_job(driver, url: str) -> Optional[Dict]:
         }
     except TimeoutException:
         return None
+
 
 def scrape_karriere(field: str, region: str, page_limit: int = 3, max_jobs: Optional[int] = None) -> Dict:
     """
